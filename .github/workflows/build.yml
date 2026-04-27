@@ -121,48 +121,44 @@ jobs:
 
       # 下载Android NDK
       - name: 下载Android NDK
-        run: |
-          echo "下载 Android NDK ${{ env.NDK_VERSION }}..."
-          cd /tmp
-          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip -O android-ndk.zip
-          unzip -q android-ndk.zip
-          sudo mv android-ndk-${{ env.NDK_VERSION }} /opt/android-ndk-${{ env.NDK_VERSION }}
-          rm android-ndk.zip
-          echo "NDK_PATH=/opt/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+        uses: android-actions/setup-android@v3
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
 
       # 配置编译环境
       - name: 配置编译环境
         run: |
           cd node-src
           
+          echo "=== NDK环境变量 ==="
+          echo "ANDROID_NDK_HOME: $ANDROID_NDK_HOME"
+          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+          ls -la "$ANDROID_NDK_HOME/"
+          
           # 设置NDK工具链路径
-          NDK_TOOLCHAIN="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64"
+          NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="$NDK_TOOLCHAIN/bin:$PATH"
           
           echo "=== NDK工具链调试信息 ==="
-          echo "NDK路径: ${{ env.NDK_PATH }}"
           echo "工具链路径: $NDK_TOOLCHAIN"
           
           # 列出可用的编译器
           echo ""
           echo "=== 可用的 aarch64 编译器 ==="
-          ls -1 "$NDK_TOOLCHAIN/bin/aarch64-linux-android*" 2>/dev/null | head -20
+          ls -1 "$NDK_TOOLCHAIN/bin/aarch64-linux-android"* 2>/dev/null | head -20
           
-          # 直接使用API级别特定的编译器名称（r27中使用aarch64-linux-android24-clang）
-          CC="$NDK_TOOLCHAIN/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang"
-          CXX="$NDK_TOOLCHAIN/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang++"
+          # 查找API级别最高的编译器
+          CC=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang 2>/dev/null | sort -V | tail -1)
+          CXX=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang++ 2>/dev/null | sort -V | tail -1)
           
           echo ""
-          echo "=== 编译器检查 ==="
+          echo "=== 使用的编译器 ==="
           echo "CC: $CC"
           echo "CXX: $CXX"
           
-          if [ ! -f "$CC" ]; then
-            echo "ERROR: C编译器不存在: $CC"
-            exit 1
-          fi
-          if [ ! -f "$CXX" ]; then
-            echo "ERROR: C++编译器不存在: $CXX"
+          if [ -z "$CC" ] || [ ! -f "$CC" ]; then
+            echo "ERROR: C编译器不存在"
+            ls -la "$NDK_TOOLCHAIN/bin/aarch64-linux-android"* 2>/dev/null || echo "没有找到 aarch64-linux-android 编译器"
             exit 1
           fi
           
@@ -171,7 +167,6 @@ jobs:
           echo "CXX=$CXX" >> $GITHUB_ENV
           echo "AR=$NDK_TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
           echo "RANLIB=$NDK_TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
-          echo "LD=$NDK_TOOLCHAIN/bin/ld.lld" >> $GITHUB_ENV
           echo "PATH=$NDK_TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
           
           # 设置GYP编译参数
@@ -179,7 +174,7 @@ jobs:
           export GYP_DEFINES="$GYP_DEFINES v8_target_arch=${{ env.TARGET_ARCH }}"
           export GYP_DEFINES="$GYP_DEFINES android_target_arch=${{ env.TARGET_ARCH }}"
           export GYP_DEFINES="$GYP_DEFINES host_os=linux OS=android"
-          export GYP_DEFINES="$GYP_DEFINES android_ndk_path=${{ env.NDK_PATH }}"
+          export GYP_DEFINES="$GYP_DEFINES android_ndk_path=$ANDROID_NDK_HOME"
           echo "GYP_DEFINES=$GYP_DEFINES" >> $GITHUB_ENV
           
           echo ""
