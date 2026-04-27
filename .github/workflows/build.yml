@@ -1,8 +1,5 @@
 name: Node.js Android 自动化编译
 
-# 触发条件
-# schedule: 每天UTC 0:00自动执行（对应北京时间早上8点）
-# workflow_dispatch: 手动触发，可指定版本号
 on:
   schedule:
     - cron: '0 0 * * *'
@@ -13,16 +10,12 @@ on:
         required: false
         type: string
 
-# 环境变量
 env:
   NDK_VERSION: 'r27d'
   ANDROID_SDK_VERSION: '24'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
-  # ===========================================
-  # 任务1：检查版本
-  # ===========================================
   check-version:
     runs-on: ubuntu-latest
     env:
@@ -31,41 +24,26 @@ jobs:
       node_version: ${{ steps.check.outputs.node_version }}
       should_build: ${{ steps.check.outputs.should_build }}
       is_new_version: ${{ steps.check.outputs.is_new_version }}
-
     steps:
-      # 检出代码
       - name: 检出代码
         uses: actions/checkout@v5
 
-      # 检查Node.js版本
       - name: 检查Node.js版本
         id: check
         run: |
-          # 获取要编译的版本号
           INPUT_VERSION="${{ github.event.inputs.node_version }}"
-
           if [ -n "$INPUT_VERSION" ]; then
-            # 如果手动指定了版本，直接使用
             NODE_VERSION="$INPUT_VERSION"
             echo "手动指定版本: $NODE_VERSION"
             echo "should_build=true" >> $GITHUB_OUTPUT
             echo "is_new_version=false" >> $GITHUB_OUTPUT
           else
-            # 自动检查最新版本
             echo "自动检查最新版本..."
-
-            # 从Node.js官方网站获取最新版本号
             LATEST_VERSION=$(curl -s https://nodejs.org/dist/latest/ | grep -oP 'v\d+\.\d+\.\d+' | head -1 | sed 's/v//')
-
-            # 读取本地存储的版本号
             CURRENT_VERSION=$(cat .version 2>/dev/null || echo "0.0.0")
-
             echo "当前版本: $CURRENT_VERSION"
             echo "最新版本: $LATEST_VERSION"
-
             NODE_VERSION="$LATEST_VERSION"
-
-            # 比较版本：如果最新版本与当前版本不同，则需要编译
             if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
               echo "发现新版本: $LATEST_VERSION"
               echo "should_build=true" >> $GITHUB_OUTPUT
@@ -76,24 +54,18 @@ jobs:
               echo "is_new_version=false" >> $GITHUB_OUTPUT
             fi
           fi
-
           echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
 
-  # ===========================================
-  # 任务2：编译 arm64 版本
-  # ===========================================
   build-arm64:
     needs: check-version
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     if: needs.check-version.outputs.should_build == 'true'
-
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
 
-      # 设置版本号环境变量
       - name: 设置环境变量
         run: |
           echo "NODE_VERSION=${{ needs.check-version.outputs.node_version }}" >> $GITHUB_ENV
@@ -101,98 +73,67 @@ jobs:
           echo "DEST_CPU=arm64" >> $GITHUB_ENV
           echo "ANDROID_API=24" >> $GITHUB_ENV
 
-      # 克隆Node.js源码
       - name: 克隆Node.js源码
         run: |
           echo "克隆 Node.js v${{ env.NODE_VERSION }} 源码..."
           git clone --depth 1 --branch v${{ env.NODE_VERSION }} https://github.com/nodejs/node.git node-src
 
-      # 安装Python
       - name: 安装Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
-      # 安装系统依赖
       - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential git wget unzip
+          sudo apt-get install -y build-essential git wget unzip ccache
 
-      # 下载Android NDK
+      - name: 设置 ccache 环境变量（增量编译加速）
+        run: |
+          echo 'export CC="ccache gcc"' >> $GITHUB_ENV
+          echo 'export CXX="ccache g++"' >> $GITHUB_ENV
+
+      - name: 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.job }}-${{ needs.check-version.outputs.node_version }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.job }}-
+
+      - name: 初始化 ccache 统计信息
+        run: ccache -z
+
       - name: 下载Android NDK
         uses: android-actions/setup-android@v3
         with:
           ndk-version: ${{ env.NDK_VERSION }}
 
-      # 配置编译环境
       - name: 配置编译环境
         run: |
           cd node-src
-          
-          echo "=== NDK环境变量 ==="
-          echo "ANDROID_NDK_HOME: $ANDROID_NDK_HOME"
-          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
-          ls -la "$ANDROID_NDK_HOME/"
-          
-          # 设置NDK工具链路径
           NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="$NDK_TOOLCHAIN/bin:$PATH"
-          
-          echo "=== NDK工具链调试信息 ==="
-          echo "工具链路径: $NDK_TOOLCHAIN"
-          
-          # 列出可用的编译器
-          echo ""
-          echo "=== 可用的 aarch64 编译器 ==="
-          ls -1 "$NDK_TOOLCHAIN/bin/aarch64-linux-android"* 2>/dev/null | head -20
-          
-          # 查找API级别最高的编译器
           CC=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang 2>/dev/null | sort -V | tail -1)
           CXX=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang++ 2>/dev/null | sort -V | tail -1)
-          
-          echo ""
-          echo "=== 使用的编译器 ==="
-          echo "CC: $CC"
-          echo "CXX: $CXX"
-          
-          if [ -z "$CC" ] || [ ! -f "$CC" ]; then
-            echo "ERROR: C编译器不存在"
-            ls -la "$NDK_TOOLCHAIN/bin/aarch64-linux-android"* 2>/dev/null || echo "没有找到 aarch64-linux-android 编译器"
-            exit 1
-          fi
-          
-          # 保存到环境变量
+          [ -z "$CC" ] || [ ! -f "$CC" ] && { echo "ERROR: C编译器不存在"; exit 1; }
           echo "CC=$CC" >> $GITHUB_ENV
           echo "CXX=$CXX" >> $GITHUB_ENV
           echo "AR=$NDK_TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
           echo "RANLIB=$NDK_TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
           echo "PATH=$NDK_TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
-          
-          # 设置GYP编译参数
-          export GYP_DEFINES="target_arch=${{ env.TARGET_ARCH }}"
-          export GYP_DEFINES="$GYP_DEFINES v8_target_arch=${{ env.TARGET_ARCH }}"
-          export GYP_DEFINES="$GYP_DEFINES android_target_arch=${{ env.TARGET_ARCH }}"
-          export GYP_DEFINES="$GYP_DEFINES host_os=linux OS=android"
-          export GYP_DEFINES="$GYP_DEFINES android_ndk_path=$ANDROID_NDK_HOME"
+          export GYP_DEFINES="target_arch=${{ env.TARGET_ARCH }} v8_target_arch=${{ env.TARGET_ARCH }} android_target_arch=${{ env.TARGET_ARCH }} host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME"
           echo "GYP_DEFINES=$GYP_DEFINES" >> $GITHUB_ENV
-          
-          echo ""
-          echo "=== 配置 Node.js ==="
           python3 ./configure \
             --dest-cpu=${{ env.DEST_CPU }} \
             --dest-os=android \
             --openssl-no-asm \
             --cross-compiling
 
-      # 编译Node.js
       - name: 编译Node.js
         run: |
           cd node-src
           echo "开始编译 Node.js arm64 版本..."
-          echo "CC=${{ env.CC }}"
-          echo "CXX=${{ env.CXX }}"
-          
           make -j$(nproc) \
             CC="${{ env.CC }}" \
             CXX="${{ env.CXX }}" \
@@ -204,7 +145,17 @@ jobs:
             RANLIB_host="ranlib" \
             V=1
 
-      # 准备输出文件
+      - name: 查看 ccache 状态与命中统计
+        run: ccache -s
+
+      - name: 保存 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.job }}-${{ needs.check-version.outputs.node_version }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.job }}-
+
       - name: 准备输出文件
         run: |
           mkdir -p output/${{ env.TARGET_ARCH }}
@@ -212,7 +163,6 @@ jobs:
           cp out/Release/node ../output/${{ env.TARGET_ARCH }}/
           cp out/Release/node ../output/${{ env.TARGET_ARCH }}/node-${{ env.NODE_VERSION }}-android-${{ env.TARGET_ARCH }}
 
-      # 上传编译产物
       - name: 上传 arm64 编译产物
         uses: actions/upload-artifact@v5
         with:
@@ -220,27 +170,21 @@ jobs:
           path: output/${{ env.TARGET_ARCH }}/
           retention-days: 30
 
-  # ===========================================
-  # 任务3：发布版本
-  # ===========================================
   release:
     needs: [build-arm64, check-version]
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     if: needs.check-version.outputs.is_new_version == 'true'
-
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
 
-      # 下载所有编译产物
-      - name: 下载编译产物
+      - name: 下载所有编译产物
         uses: actions/download-artifact@v5
         with:
           path: output
 
-      # 更新版本文件
       - name: 更新版本文件
         run: |
           echo '${{ needs.check-version.outputs.node_version }}' > .version
@@ -250,7 +194,6 @@ jobs:
           git commit -m "更新版本: ${{ needs.check-version.outputs.node_version }}"
           git push
 
-      # 创建GitHub Release
       - name: 创建Release
         uses: softprops/action-gh-release@v1
         with:
@@ -268,7 +211,6 @@ jobs:
             chmod +x node
             ./node --version
             ```
-
             ## 编译信息
             - Node.js版本: ${{ needs.check-version.outputs.node_version }}
             - Android SDK版本: ${{ env.ANDROID_SDK_VERSION }}
@@ -279,7 +221,6 @@ jobs:
             | 架构 | 文件名 |
             |------|--------|
             | arm64 | node-${{ needs.check-version.outputs.node_version }}-android-arm64 |
-
           files: |
             output/**/node-*
             output/**/node
