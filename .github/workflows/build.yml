@@ -99,6 +99,7 @@ jobs:
           echo "NODE_VERSION=${{ needs.check-version.outputs.node_version }}" >> $GITHUB_ENV
           echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
           echo "DEST_CPU=arm64" >> $GITHUB_ENV
+          echo "ANDROID_API=24" >> $GITHUB_ENV
 
       # 克隆Node.js源码
       - name: 克隆Node.js源码
@@ -133,33 +134,56 @@ jobs:
       - name: 配置编译环境
         run: |
           cd node-src
-          export PATH="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-
-          # 调试信息：列出可用的编译器
-          echo "可用的编译器："
-          ls -la ${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/
-
-          # 查找实际可用的编译器名称
-          CLANG=$(ls ${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android*-clang | head -1)
-          CLANGXX=$(ls ${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android*-clang++ | head -1)
-          echo "使用的编译器：$CLANG"
-          echo "使用的 C++ 编译器：$CLANGXX"
-
-          # 保存路径到环境变量
-          echo "PATH=${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
-          echo "CC=$CLANG" >> $GITHUB_ENV
-          echo "CXX=$CLANGXX" >> $GITHUB_ENV
-          echo "AR=${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" >> $GITHUB_ENV
-          echo "RANLIB=${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib" >> $GITHUB_ENV
-
+          
+          # 设置NDK工具链路径
+          NDK_TOOLCHAIN="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="$NDK_TOOLCHAIN/bin:$PATH"
+          
+          echo "=== NDK工具链调试信息 ==="
+          echo "NDK路径: ${{ env.NDK_PATH }}"
+          echo "工具链路径: $NDK_TOOLCHAIN"
+          
+          # 列出可用的编译器
+          echo ""
+          echo "=== 可用的 aarch64 编译器 ==="
+          ls -1 "$NDK_TOOLCHAIN/bin/aarch64-linux-android*" 2>/dev/null | head -20
+          
+          # 直接使用API级别特定的编译器名称（r27中使用aarch64-linux-android24-clang）
+          CC="$NDK_TOOLCHAIN/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang"
+          CXX="$NDK_TOOLCHAIN/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang++"
+          
+          echo ""
+          echo "=== 编译器检查 ==="
+          echo "CC: $CC"
+          echo "CXX: $CXX"
+          
+          if [ ! -f "$CC" ]; then
+            echo "ERROR: C编译器不存在: $CC"
+            exit 1
+          fi
+          if [ ! -f "$CXX" ]; then
+            echo "ERROR: C++编译器不存在: $CXX"
+            exit 1
+          fi
+          
+          # 保存到环境变量
+          echo "CC=$CC" >> $GITHUB_ENV
+          echo "CXX=$CXX" >> $GITHUB_ENV
+          echo "AR=$NDK_TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+          echo "RANLIB=$NDK_TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+          echo "LD=$NDK_TOOLCHAIN/bin/ld.lld" >> $GITHUB_ENV
+          echo "PATH=$NDK_TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
+          
           # 设置GYP编译参数
           export GYP_DEFINES="target_arch=${{ env.TARGET_ARCH }}"
           export GYP_DEFINES="$GYP_DEFINES v8_target_arch=${{ env.TARGET_ARCH }}"
           export GYP_DEFINES="$GYP_DEFINES android_target_arch=${{ env.TARGET_ARCH }}"
           export GYP_DEFINES="$GYP_DEFINES host_os=linux OS=android"
           export GYP_DEFINES="$GYP_DEFINES android_ndk_path=${{ env.NDK_PATH }}"
-
-          echo "配置 Node.js 编译..."
+          echo "GYP_DEFINES=$GYP_DEFINES" >> $GITHUB_ENV
+          
+          echo ""
+          echo "=== 配置 Node.js ==="
           python3 ./configure \
             --dest-cpu=${{ env.DEST_CPU }} \
             --dest-os=android \
@@ -170,8 +194,10 @@ jobs:
       - name: 编译Node.js
         run: |
           cd node-src
-          export PATH="${{ env.PATH }}"
           echo "开始编译 Node.js arm64 版本..."
+          echo "CC=${{ env.CC }}"
+          echo "CXX=${{ env.CXX }}"
+          
           make -j$(nproc) \
             CC="${{ env.CC }}" \
             CXX="${{ env.CXX }}" \
@@ -180,7 +206,8 @@ jobs:
             CC_host="gcc" \
             CXX_host="g++" \
             AR_host="ar" \
-            RANLIB_host="ranlib"
+            RANLIB_host="ranlib" \
+            V=1
 
       # 准备输出文件
       - name: 准备输出文件
@@ -202,7 +229,7 @@ jobs:
   # 任务3：发布版本
   # ===========================================
   release:
-    needs: [build-arm64]
+    needs: [build-arm64, check-version]
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
