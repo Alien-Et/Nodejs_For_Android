@@ -164,8 +164,9 @@ jobs:
       - name: 编译Node.js
         run: |
           cd node-src
+          export PATH="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           echo "开始编译 Node.js arm64 版本..."
-          make -j$(nproc)
+          make -j$(nproc) CC="${{ env.CC }}" CXX="${{ env.CXX }}"
 
       # 准备输出文件
       - name: 准备输出文件
