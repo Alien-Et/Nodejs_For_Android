@@ -1,0 +1,232 @@
+name: Node.js Android 自动化编译
+
+# 触发条件
+# schedule: 每天UTC 0:00自动执行（对应北京时间早上8点）
+# workflow_dispatch: 手动触发，可指定版本号
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: 'Node.js版本号（例如：24.0.0），留空则自动检查最新版本'
+        required: false
+        type: string
+
+# 环境变量
+env:
+  NDK_VERSION: 'r27d'
+  ANDROID_SDK_VERSION: '24'
+
+jobs:
+  # ===========================================
+  # 任务1：检查版本
+  # ===========================================
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      node_version: ${{ steps.check.outputs.node_version }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      is_new_version: ${{ steps.check.outputs.is_new_version }}
+
+    steps:
+      # 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 检查Node.js版本
+      - name: 检查Node.js版本
+        id: check
+        run: |
+          # 获取要编译的版本号
+          INPUT_VERSION="${{ github.event.inputs.node_version }}"
+
+          if [ -n "$INPUT_VERSION" ]; then
+            # 如果手动指定了版本，直接使用
+            NODE_VERSION="$INPUT_VERSION"
+            echo "手动指定版本: $NODE_VERSION"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "is_new_version=false" >> $GITHUB_OUTPUT
+          else
+            # 自动检查最新版本
+            echo "自动检查最新版本..."
+
+            # 从Node.js官方网站获取最新版本号
+            LATEST_VERSION=$(curl -s https://nodejs.org/dist/latest/ | grep -oP 'v\d+\.\d+\.\d+' | head -1 | sed 's/v//')
+
+            # 读取本地存储的版本号
+            CURRENT_VERSION=$(cat .version 2>/dev/null || echo "0.0.0")
+
+            echo "当前版本: $CURRENT_VERSION"
+            echo "最新版本: $LATEST_VERSION"
+
+            NODE_VERSION="$LATEST_VERSION"
+
+            # 比较版本：如果最新版本与当前版本不同，则需要编译
+            if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+              echo "发现新版本: $LATEST_VERSION"
+              echo "should_build=true" >> $GITHUB_OUTPUT
+              echo "is_new_version=true" >> $GITHUB_OUTPUT
+            else
+              echo "已是最新版本，无需编译"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              echo "is_new_version=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+          echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
+
+  # ===========================================
+  # 任务2：编译 arm64 版本
+  # ===========================================
+  build-arm64:
+    needs: check-version
+    runs-on: ubuntu-latest
+    if: needs.check-version.outputs.should_build == 'true'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 设置版本号环境变量
+      - name: 设置环境变量
+        run: |
+          echo "NODE_VERSION=${{ needs.check-version.outputs.node_version }}" >> $GITHUB_ENV
+          echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
+          echo "DEST_CPU=arm64" >> $GITHUB_ENV
+
+      # 克隆Node.js源码
+      - name: 克隆Node.js源码
+        run: |
+          echo "克隆 Node.js v${{ env.NODE_VERSION }} 源码..."
+          git clone --depth 1 --branch v${{ env.NODE_VERSION }} https://github.com/nodejs/node.git node-src
+
+      # 安装Python
+      - name: 安装Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 安装系统依赖
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git wget unzip
+
+      # 下载Android NDK
+      - name: 下载Android NDK
+        run: |
+          echo "下载 Android NDK ${{ env.NDK_VERSION }}..."
+          cd /tmp
+          wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip -O android-ndk.zip
+          unzip -q android-ndk.zip
+          sudo mv android-ndk-${{ env.NDK_VERSION }} /opt/android-ndk-${{ env.NDK_VERSION }}
+          rm android-ndk.zip
+          echo "NDK_PATH=/opt/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+
+      # 配置编译环境
+      - name: 配置编译环境
+        run: |
+          cd node-src
+          export PATH="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          export CC=aarch64-linux-android${{ env.ANDROID_SDK_VERSION }}-clang
+          export CXX=aarch64-linux-android${{ env.ANDROID_SDK_VERSION }}-clang++
+
+          # 设置GYP编译参数
+          export GYP_DEFINES="target_arch=${{ env.TARGET_ARCH }}"
+          export GYP_DEFINES="$GYP_DEFINES v8_target_arch=${{ env.TARGET_ARCH }}"
+          export GYP_DEFINES="$GYP_DEFINES android_target_arch=${{ env.TARGET_ARCH }}"
+          export GYP_DEFINES="$GYP_DEFINES host_os=linux OS=android"
+          export GYP_DEFINES="$GYP_DEFINES android_ndk_path=${{ env.NDK_PATH }}"
+
+          echo "配置 Node.js 编译..."
+          python3 ./configure --dest-cpu=${{ env.DEST_CPU }} --dest-os=android --openssl-no-asm --cross-compiling
+
+      # 编译Node.js
+      - name: 编译Node.js
+        run: |
+          cd node-src
+          echo "开始编译 Node.js arm64 版本..."
+          make -j$(nproc)
+
+      # 准备输出文件
+      - name: 准备输出文件
+        run: |
+          mkdir -p output/${{ env.TARGET_ARCH }}
+          cd node-src
+          cp out/Release/node ../output/${{ env.TARGET_ARCH }}/
+          cp out/Release/node ../output/${{ env.TARGET_ARCH }}/node-${{ env.NODE_VERSION }}-android-${{ env.TARGET_ARCH }}
+
+      # 上传编译产物
+      - name: 上传 arm64 编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-android-arm64-v${{ env.NODE_VERSION }}
+          path: output/${{ env.TARGET_ARCH }}/
+          retention-days: 30
+
+  # ===========================================
+  # 任务3：发布版本
+  # ===========================================
+  release:
+    needs: [build-arm64]
+    runs-on: ubuntu-latest
+    if: needs.check-version.outputs.is_new_version == 'true'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 下载所有编译产物
+      - name: 下载编译产物
+        uses: actions/download-artifact@v4
+        with:
+          path: output
+
+      # 更新版本文件
+      - name: 更新版本文件
+        run: |
+          echo '${{ needs.check-version.outputs.node_version }}' > .version
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .version
+          git commit -m "更新版本: ${{ needs.check-version.outputs.node_version }}"
+          git push
+
+      # 创建GitHub Release
+      - name: 创建Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.node_version }}-android
+          name: Node.js v${{ needs.check-version.outputs.node_version }} Android版
+          body: |
+            # Node.js Android 预编译版本
+
+            ## 支持架构
+            - **arm64 (aarch64)**: Android 7.0+ 64位设备
+
+            ## 安装说明
+            下载对应架构的二进制文件后，执行以下命令：
+            ```bash
+            chmod +x node
+            ./node --version
+            ```
+
+            ## 编译信息
+            - Node.js版本: ${{ needs.check-version.outputs.node_version }}
+            - Android SDK版本: ${{ env.ANDROID_SDK_VERSION }}
+            - NDK版本: ${{ env.NDK_VERSION }}
+            - 编译选项: --openssl-no-asm
+
+            ## 文件列表
+            | 架构 | 文件名 |
+            |------|--------|
+            | arm64 | node-${{ needs.check-version.outputs.node_version }}-android-arm64 |
+
+          files: |
+            output/**/node-*
+            output/**/node
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
