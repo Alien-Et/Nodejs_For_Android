@@ -145,8 +145,10 @@ jobs:
           echo "使用的编译器：$CLANG"
           echo "使用的 C++ 编译器：$CLANGXX"
 
-          export CC=$CLANG
-          export CXX=$CLANGXX
+          # 保存编译器路径到环境变量文件中，供后续步骤使用
+          echo "CC=$CLANG" >> $GITHUB_ENV
+          echo "CXX=$CLANGXX" >> $GITHUB_ENV
+          echo "PATH=${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
 
           # 设置GYP编译参数
           export GYP_DEFINES="target_arch=${{ env.TARGET_ARCH }}"
@@ -162,7 +164,6 @@ jobs:
       - name: 编译Node.js
         run: |
           cd node-src
-          export PATH="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           echo "开始编译 Node.js arm64 版本..."
           make -j$(nproc)
 
