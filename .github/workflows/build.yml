@@ -134,8 +134,19 @@ jobs:
         run: |
           cd node-src
           export PATH="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
-          export CC=aarch64-linux-android${{ env.ANDROID_SDK_VERSION }}-clang
-          export CXX=aarch64-linux-android${{ env.ANDROID_SDK_VERSION }}-clang++
+
+          # 调试信息：列出可用的编译器
+          echo "可用的编译器："
+          ls -la ${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/
+
+          # 查找实际可用的编译器名称
+          CLANG=$(ls ${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android*-clang | head -1)
+          CLANGXX=$(ls ${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android*-clang++ | head -1)
+          echo "使用的编译器：$CLANG"
+          echo "使用的 C++ 编译器：$CLANGXX"
+
+          export CC=$CLANG
+          export CXX=$CLANGXX
 
           # 设置GYP编译参数
           export GYP_DEFINES="target_arch=${{ env.TARGET_ARCH }}"
@@ -151,6 +162,7 @@ jobs:
       - name: 编译Node.js
         run: |
           cd node-src
+          export PATH="${{ env.NDK_PATH }}/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           echo "开始编译 Node.js arm64 版本..."
           make -j$(nproc)
 
