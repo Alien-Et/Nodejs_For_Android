@@ -25,6 +25,8 @@ jobs:
   # ===========================================
   check-version:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     outputs:
       node_version: ${{ steps.check.outputs.node_version }}
       should_build: ${{ steps.check.outputs.should_build }}
@@ -83,6 +85,8 @@ jobs:
   build-arm64:
     needs: check-version
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     if: needs.check-version.outputs.should_build == 'true'
 
     steps:
@@ -172,6 +176,8 @@ jobs:
   release:
     needs: [build-arm64]
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     if: needs.check-version.outputs.is_new_version == 'true'
 
     steps:
