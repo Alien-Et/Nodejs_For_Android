@@ -33,7 +33,7 @@ jobs:
     steps:
       # 检出代码
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # 检查Node.js版本
       - name: 检查Node.js版本
@@ -87,7 +87,7 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # 设置版本号环境变量
       - name: 设置环境变量
@@ -104,7 +104,7 @@ jobs:
 
       # 安装Python
       - name: 安装Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -160,7 +160,7 @@ jobs:
 
       # 上传编译产物
       - name: 上传 arm64 编译产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: node-android-arm64-v${{ env.NODE_VERSION }}
           path: output/${{ env.TARGET_ARCH }}/
@@ -176,11 +176,11 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # 下载所有编译产物
       - name: 下载编译产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: output
 
