@@ -129,6 +129,7 @@ jobs:
         run: |
           cd node-src
           
+          # 使用 NDK 的 LLVM 工具链
           NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="$NDK_TOOLCHAIN/bin:$PATH"
           
