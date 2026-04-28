@@ -1,4 +1,4 @@
-name: Node.js Android 编译
+name: Node.js Android 自动化编译
 
 on:
   schedule:
@@ -9,21 +9,10 @@ on:
         description: 'Node.js版本号（例如：24.0.0），留空则自动检查最新版本'
         required: false
         type: string
-      build_method:
-        description: '编译方式'
-        required: false
-        type: choice
-        default: 'docker'
-        options:
-          - docker
-          - native
 
 env:
   NDK_VERSION: 'r27d'
-  ICU_VERSION: '78.1'
-  LLVM_TAR: 'clang-llvmorg-21-init-5118-g52cd27e6-5.tar.xz'
-  LLVM_TAR_HASH: '790fcc5b04e96882e8227ba7994161ab945c0e096057fc165a0f71e32a7cb061'
-  DOCKER_IMAGE: 'nodejs-android-termux'
+  ANDROID_SDK_VERSION: '24'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
@@ -72,9 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-      BUILD_METHOD: ${{ github.event.inputs.build_method || 'docker' }}
     if: needs.check-version.outputs.should_build == 'true'
-
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
@@ -84,255 +71,126 @@ jobs:
           echo "NODE_VERSION=${{ needs.check-version.outputs.node_version }}" >> $GITHUB_ENV
           echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
           echo "DEST_CPU=arm64" >> $GITHUB_ENV
-          echo "HOSTBUILD_DIR=${{ github.workspace }}/hostbuild" >> $GITHUB_ENV
-          echo "BUILD_METHOD=${{ env.BUILD_METHOD }}" >> $GITHUB_ENV
+          echo "ANDROID_API=24" >> $GITHUB_ENV
 
       - name: 克隆Node.js源码
         run: |
           echo "克隆 Node.js v${{ env.NODE_VERSION }} 源码..."
           git clone --depth 1 --branch v${{ env.NODE_VERSION }} https://github.com/nodejs/node.git node-src
 
-      - name: 应用补丁
+      - name: 修复 simdutf 函数名称错误
         run: |
-          echo "应用 Termux 补丁..."
+          echo "修复 simdutf 函数名称..."
           cd node-src
-          for patch in ../patches/*.patch; do
-            if [ -f "$patch" ]; then
-              echo "应用补丁: $(basename $patch)"
-              patch -p1 < "$patch" || echo "补丁 $(basename $patch) 应用失败，继续..."
-            fi
-          done
+          # 修复 Line 509: atomic_base64_to_binary_safe -> base64_to_binary_safe
+          sed -i 's/simdutf::atomic_base64_to_binary_safe/simdutf::base64_to_binary_safe/g' deps/v8/src/builtins/builtins-typed-array.cc
+          # 修复 Line 839: atomic_binary_to_base64 -> binary_to_base64
+          sed -i 's/simdutf::atomic_binary_to_base64/simdutf::binary_to_base64/g' deps/v8/src/builtins/builtins-typed-array.cc
           echo "补丁应用完成"
 
-      - name: Docker 构建方式
-        if: env.BUILD_METHOD == 'docker'
-        run: |
-          echo "=== 使用 Docker 方式构建 ==="
-
-      - name: 构建 Docker 镜像
-        if: env.BUILD_METHOD == 'docker'
-        run: |
-          echo "构建 Docker 镜像: ${{ env.DOCKER_IMAGE }}"
-          docker build -t ${{ env.DOCKER_IMAGE }} .
-
-      - name: 运行 Docker 容器编译
-        if: env.BUILD_METHOD == 'docker'
-        run: |
-          echo "启动 Docker 容器进行编译..."
-          docker run --rm \
-            -v "${{ github.workspace }}/node-src:/workspace/node-src" \
-            -v "${{ github.workspace }}/output:/workspace/output" \
-            -e NODE_VERSION=${{ env.NODE_VERSION }} \
-            ${{ env.DOCKER_IMAGE }} \
-            bash -c "
-              cd /workspace/node-src
-              
-              export ANDROID_NDK_HOME=/opt/android-ndk-r27d
-              export PATH=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin:\$PATH\"
-              export CC=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang\"
-              export CXX=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++\"
-              export AR=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar\"
-              export RANLIB=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib\"
-              export CC_host=/opt/llvm-project-build/bin/clang
-              export CXX_host=/opt/llvm-project-build/bin/clang++
-              export LD_LIBRARY_PATH=/opt/icu-installed/lib:\$LD_LIBRARY_PATH
-              
-              python3 ./configure \
-                --dest-cpu=arm64 \
-                --dest-os=android \
-                --without-npm \
-                --shared-cares \
-                --shared-openssl \
-                --shared-sqlite \
-                --shared-zlib \
-                --with-intl=system-icu \
-                --cross-compiling \
-                --ninja
-              
-              ninja -C out/Release -j\$(nproc)
-              
-              mkdir -p /workspace/output/arm64
-              cp out/Release/node /workspace/output/arm64/
-              cp out/Release/node /workspace/output/arm64/node-\${NODE_VERSION}-android-arm64
-            "
-
-      - name: 原生构建方式
-        if: env.BUILD_METHOD == 'native'
-        run: |
-          echo "=== 使用原生方式构建 ==="
-
       - name: 安装Python
-        if: env.BUILD_METHOD == 'native'
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: 安装系统依赖
-        if: env.BUILD_METHOD == 'native'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential git wget unzip ninja-build xz-utils
+          sudo apt-get install -y build-essential git wget unzip ccache
+
+      - name: 设置 ccache 环境变量（增量编译加速）
+        run: |
+          echo 'export CC="ccache gcc"' >> $GITHUB_ENV
+          echo 'export CXX="ccache g++"' >> $GITHUB_ENV
+
+      - name: 恢复 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.job }}-${{ needs.check-version.outputs.node_version }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.job }}-
+
+      - name: 初始化 ccache 统计信息
+        run: ccache -z
 
       - name: 下载Android NDK
-        if: env.BUILD_METHOD == 'native'
         uses: android-actions/setup-android@v3
         with:
           ndk-version: ${{ env.NDK_VERSION }}
 
-      - name: 下载并构建 ICU
-        if: env.BUILD_METHOD == 'native'
-        run: |
-          echo "=== 步骤1: 下载并构建 ICU ==="
-          mkdir -p ${{ env.HOSTBUILD_DIR }}
-          cd ${{ env.HOSTBUILD_DIR }}
-          
-          ICU_TAR="icu4c-${{ env.ICU_VERSION }}-sources.tgz"
-          ICU_DOWNLOAD="https://github.com/unicode-org/icu/releases/download/release-${{ env.ICU_VERSION }}/$ICU_TAR"
-          
-          echo "下载 ICU ${{ env.ICU_VERSION }}..."
-          wget -q "$ICU_DOWNLOAD" -O "$ICU_TAR"
-          tar xf "$ICU_TAR"
-          cd icu/source
-          
-          echo "配置 ICU..."
-          ./configure --prefix=${{ env.HOSTBUILD_DIR }}/icu-installed \
-            --disable-samples \
-            --disable-tests
-          
-          echo "编译 ICU..."
-          make -j$(nproc) install
-          
-          echo "ICU 构建完成"
-
-      - name: 下载 Chromium Clang 工具链
-        if: env.BUILD_METHOD == 'native'
-        run: |
-          echo "=== 步骤2: 下载 Chromium Clang 工具链 (用于 V8) ==="
-          cd ${{ env.HOSTBUILD_DIR }}
-          mkdir -p llvm-project-build
-          
-          echo "下载 LLVM: ${{ env.LLVM_TAR }}"
-          wget -q "https://commondatastorage.googleapis.com/chromium-browser-clang/Linux_x64/${{ env.LLVM_TAR }}" -O "${{ env.LLVM_TAR }}"
-          
-          echo "验证文件 hash..."
-          echo "${{ env.LLVM_TAR_HASH }}  ${{ env.LLVM_TAR }}" | sha256sum -c || { echo "Hash 验证失败!"; exit 1; }
-          
-          tar --extract -f "${{ env.LLVM_TAR }}" --directory=llvm-project-build
-          
-          echo "Chromium Clang 下载完成"
-
       - name: 配置编译环境
-        if: env.BUILD_METHOD == 'native'
         run: |
-          echo "=== 步骤3: 配置 Node.js 编译环境 ==="
           cd node-src
-          
           NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           export PATH="$NDK_TOOLCHAIN/bin:$PATH"
-          
-          CC="$NDK_TOOLCHAIN/bin/aarch64-linux-android24-clang"
-          CXX="$NDK_TOOLCHAIN/bin/aarch64-linux-android24-clang++"
-          
-          export CC_host="${{ env.HOSTBUILD_DIR }}/llvm-project-build/bin/clang"
-          export CXX_host="${{ env.HOSTBUILD_DIR }}/llvm-project-build/bin/clang++"
-          export LINK_host="${{ env.HOSTBUILD_DIR }}/llvm-project-build/bin/clang++"
-          
-          export LD_LIBRARY_PATH=${{ env.HOSTBUILD_DIR }}/icu-installed/lib:$LD_LIBRARY_PATH
-          
-          if [ ! -f "$CC" ]; then
-            echo "ERROR: 目标 C 编译器不存在"
-            exit 1
-          fi
-          
+          CC=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang 2>/dev/null | sort -V | tail -1)
+          CXX=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang++ 2>/dev/null | sort -V | tail -1)
+          [ -z "$CC" ] || [ ! -f "$CC" ] && { echo "ERROR: C编译器不存在"; exit 1; }
           echo "CC=$CC" >> $GITHUB_ENV
           echo "CXX=$CXX" >> $GITHUB_ENV
           echo "AR=$NDK_TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
           echo "RANLIB=$NDK_TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
           echo "PATH=$NDK_TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
-          
-          export GYP_DEFINES="host_os=linux"
-          export GYP_DEFINES="$GYP_DEFINES v8_target_arch=arm64"
-          export GYP_DEFINES="$GYP_DEFINES target_arch=arm64"
-          
-          echo ""
-          echo "=== 配置 Node.js ==="
+          export GYP_DEFINES="target_arch=${{ env.TARGET_ARCH }} v8_target_arch=${{ env.TARGET_ARCH }} android_target_arch=${{ env.TARGET_ARCH }} host_os=linux OS=android android_ndk_path=$ANDROID_NDK_HOME"
+          echo "GYP_DEFINES=$GYP_DEFINES" >> $GITHUB_ENV
           python3 ./configure \
-            --dest-cpu=arm64 \
+            --dest-cpu=${{ env.DEST_CPU }} \
             --dest-os=android \
-            --without-npm \
-            --shared-cares \
-            --shared-openssl \
-            --shared-sqlite \
-            --shared-zlib \
-            --with-intl=system-icu \
-            --cross-compiling \
-            --ninja
-
-      - name: 修复 ICU 路径
-        if: env.BUILD_METHOD == 'native'
-        run: |
-          echo "=== 步骤4: 修复 ICU 路径 ==="
-          cd node-src
-          
-          sed -i \
-            -e "s|-I${{ env.HOSTBUILD_DIR }}/icu-installed/include||g" \
-            -e "s|-L${{ env.HOSTBUILD_DIR }}/icu-installed/lib||g" \
-            -e "s|-licui18n||g" \
-            -e "s|-licuuc||g" \
-            -e "s|-licudata||g" \
-            out/Release/obj.host/node_js2c.ninja 2>/dev/null || true
-          
-          find out/Release/obj.host -name '*.ninja' -exec sed -i \
-            -e "s|-I${{ env.HOSTBUILD_DIR }}/icu-installed/include|-I${{ env.HOSTBUILD_DIR }}/icu-installed/include|g" \
-            -e "s|-L${{ env.HOSTBUILD_DIR }}/icu-installed/lib|-L${{ env.HOSTBUILD_DIR }}/icu-installed/lib|g" \
-            {} \; 2>/dev/null || true
-          
-          echo "ICU 路径修复完成"
+            --openssl-no-asm \
+            --cross-compiling
 
       - name: 编译Node.js
-        if: env.BUILD_METHOD == 'native'
         run: |
-          echo "=== 步骤5: 编译 Node.js ==="
           cd node-src
-          export PATH="${{ env.PATH }}"
-          export LD_LIBRARY_PATH=${{ env.HOSTBUILD_DIR }}/icu-installed/lib:$LD_LIBRARY_PATH
-          export CC="${{ env.CC }}"
-          export CXX="${{ env.CXX }}"
-          export AR="${{ env.AR }}"
-          export RANLIB="${{ env.RANLIB }}"
-          
-          echo "CC: $CC"
-          echo "CXX: $CXX"
-          echo "开始 ninja 编译..."
-          ninja -C out/Release -j$(nproc)
+          echo "开始编译 Node.js arm64 版本..."
+          make -j$(nproc) \
+            CC="${{ env.CC }}" \
+            CXX="${{ env.CXX }}" \
+            AR="${{ env.AR }}" \
+            RANLIB="${{ env.RANLIB }}" \
+            CC_host="gcc" \
+            CXX_host="g++" \
+            AR_host="ar" \
+            RANLIB_host="ranlib" \
+            V=1
 
-      - name: 准备输出文件 (原生方式)
-        if: env.BUILD_METHOD == 'native'
+      - name: 查看 ccache 状态与命中统计
+        run: ccache -s
+
+      - name: 保存 ccache 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.job }}-${{ needs.check-version.outputs.node_version }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.job }}-
+
+      - name: 准备输出文件
         run: |
           mkdir -p output/${{ env.TARGET_ARCH }}
           cd node-src
           cp out/Release/node ../output/${{ env.TARGET_ARCH }}/
           cp out/Release/node ../output/${{ env.TARGET_ARCH }}/node-${{ env.NODE_VERSION }}-android-${{ env.TARGET_ARCH }}
 
-      - name: 上传编译产物
+      - name: 上传 arm64 编译产物
         uses: actions/upload-artifact@v5
         with:
-          name: node-android-arm64-${{ env.BUILD_METHOD }}-v${{ env.NODE_VERSION }}
+          name: node-android-arm64-v${{ env.NODE_VERSION }}
           path: output/${{ env.TARGET_ARCH }}/
           retention-days: 30
 
   release:
-    needs: [build-arm64]
+    needs: [build-arm64, check-version]
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
     if: needs.check-version.outputs.is_new_version == 'true'
-
     steps:
       - name: 检出代码
         uses: actions/checkout@v5
 
-      - name: 下载编译产物
+      - name: 下载所有编译产物
         uses: actions/download-artifact@v5
         with:
           path: output
@@ -349,19 +207,13 @@ jobs:
       - name: 创建Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ needs.check-version.outputs.node_version }}-android-${{ needs.build-arm64.outputs.BUILD_METHOD }}
-          name: Node.js v${{ needs.check-version.outputs.node_version }} Android版 (${{ needs.build-arm64.outputs.BUILD_METHOD }})
+          tag_name: v${{ needs.check-version.outputs.node_version }}-android
+          name: Node.js v${{ needs.check-version.outputs.node_version }} Android版
           body: |
             # Node.js Android 预编译版本
 
             ## 支持架构
             - **arm64 (aarch64)**: Android 7.0+ 64位设备
-
-            ## 编译方式
-            - 构建方法: ${{ needs.build-arm64.outputs.BUILD_METHOD }}
-            - ICU版本: 78.1
-            - NDK版本: r27d
-            - LLVM工具链: Chromium Clang
 
             ## 安装说明
             下载对应架构的二进制文件后，执行以下命令：
@@ -369,12 +221,16 @@ jobs:
             chmod +x node
             ./node --version
             ```
+            ## 编译信息
+            - Node.js版本: ${{ needs.check-version.outputs.node_version }}
+            - Android SDK版本: ${{ env.ANDROID_SDK_VERSION }}
+            - NDK版本: ${{ env.NDK_VERSION }}
+            - 编译选项: --openssl-no-asm
 
             ## 文件列表
             | 架构 | 文件名 |
             |------|--------|
             | arm64 | node-${{ needs.check-version.outputs.node_version }}-android-arm64 |
-
           files: |
             output/**/node-*
             output/**/node
