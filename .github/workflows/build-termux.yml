@@ -236,13 +236,15 @@ jobs:
           cd node-src
           export PATH="${{ env.PATH }}"
           export LD_LIBRARY_PATH=${{ env.HOSTBUILD_DIR }}/icu-installed/lib:$LD_LIBRARY_PATH
+          export CC="${{ env.CC }}"
+          export CXX="${{ env.CXX }}"
+          export AR="${{ env.AR }}"
+          export RANLIB="${{ env.RANLIB }}"
           
+          echo "CC: $CC"
+          echo "CXX: $CXX"
           echo "开始 ninja 编译..."
-          ninja -C out/Release -j$(nproc) \
-            CC="${{ env.CC }}" \
-            CXX="${{ env.CXX }}" \
-            AR="${{ env.AR }}" \
-            RANLIB="${{ env.RANLIB }}"
+          ninja -C out/Release -j$(nproc)
 
       - name: 准备输出文件
         run: |
