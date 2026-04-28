@@ -1,12 +1,22 @@
-diff '--color=auto' -uNr node-v18.0.0.orig/deps/uv/src/unix/core.c node-v18.0.0/deps/uv/src/unix/core.c
---- node-v18.0.0.orig/deps/uv/src/unix/core.c	2022-04-21 15:15:32.621869790 +0530
-+++ node-v18.0.0/deps/uv/src/unix/core.c	2022-04-21 15:29:22.728123998 +0530
-@@ -1125,7 +1125,7 @@
- 
-   /* No temp environment variables defined */
-   #if defined(__ANDROID__)
--    buf = "/data/local/tmp";
-+    buf = "@TERMUX_PREFIX@/tmp";
-   #else
-     buf = "/tmp";
-   #endif
+--- a/deps/uv/src/unix/core.c
++++ b/deps/uv/src/unix/core.c
+@@ -5,8 +5,8 @@
+  * May be copied under the terms of the libuv license.
+  * Copyright (C) 2015 libuv contributors
+  */
+-#if defined(__ANDROID_API__) && __ANDROID_API__ >= 24
+-  buf = "@TERMUX_PREFIX@/tmp";
++#if defined(__ANDROID_API__) && __ANDROID_API__ >= 24 && !defined(LIBUV_ANDROID_UNIFIED)
++  buf = "/data/local/tmp/nodejs";
+   char* tmpdir = getenv("TMPDIR");
+   if (tmpdir == NULL) {
+     tmpdir = getenv("TMP");
+@@ -14,7 +14,7 @@
+     tmpdir = getenv("TEMP");
+   }
+   if (tmpdir != NULL) {
+-    if (strlen(tmpdir) > 1020) buflen = 0;
++    if (buflen < 2) buflen = 0;
+     else snprintf(buf, buflen, "%s", tmpdir);
+   }
+ #else

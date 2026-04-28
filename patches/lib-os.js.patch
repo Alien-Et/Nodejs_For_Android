@@ -3,9 +3,8 @@
 @@ -190,7 +190,7 @@
      return path;
    }
- 
--  return getTempDir() || '/tmp';
-+  return getTempDir() || '@TERMUX_PREFIX@/tmp';
+
+-  return getTempDir() || '@TERMUX_PREFIX@/tmp';
++  return getTempDir() || '/data/local/tmp/nodejs';
  }
  tmpdir[SymbolToPrimitive] = () => tmpdir();
- 
