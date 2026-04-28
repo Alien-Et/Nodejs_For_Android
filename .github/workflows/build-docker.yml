@@ -1,0 +1,209 @@
+name: Node.js Android 编译 (Docker + Termux)
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: 'Node.js版本号（例如：24.0.0），留空则自动检查最新版本'
+        required: false
+        type: string
+
+env:
+  DOCKER_IMAGE: 'nodejs-android-termux'
+  NODEJS_LTS_VERSION: '24.14.1'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    outputs:
+      node_version: ${{ steps.check.outputs.node_version }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      is_new_version: ${{ steps.check.outputs.is_new_version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 检查Node.js版本
+        id: check
+        run: |
+          INPUT_VERSION="${{ github.event.inputs.node_version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            NODE_VERSION="$INPUT_VERSION"
+            echo "手动指定版本: $NODE_VERSION"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "is_new_version=false" >> $GITHUB_OUTPUT
+          else
+            echo "自动检查最新版本..."
+            LATEST_VERSION=$(curl -s https://nodejs.org/dist/latest/ | grep -oP 'v\d+\.\d+\.\d+' | head -1 | sed 's/v//')
+            CURRENT_VERSION=$(cat .version 2>/dev/null || echo "0.0.0")
+            echo "当前版本: $CURRENT_VERSION"
+            echo "最新版本: $LATEST_VERSION"
+            NODE_VERSION="$LATEST_VERSION"
+            if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+              echo "发现新版本: $LATEST_VERSION"
+              echo "should_build=true" >> $GITHUB_OUTPUT
+              echo "is_new_version=true" >> $GITHUB_OUTPUT
+            else
+              echo "已是最新版本，无需编译"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              echo "is_new_version=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+          echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
+
+  build-docker:
+    needs: check-version
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    if: needs.check-version.outputs.should_build == 'true'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置环境变量
+        run: |
+          echo "NODE_VERSION=${{ needs.check-version.outputs.node_version }}" >> $GITHUB_ENV
+
+      - name: 构建 Docker 镜像
+        run: |
+          echo "构建 Docker 镜像: ${{ env.DOCKER_IMAGE }}"
+          docker build -t ${{ env.DOCKER_IMAGE }} .
+
+      - name: 克隆 Node.js 源码
+        run: |
+          echo "克隆 Node.js v${{ env.NODE_VERSION }} 源码..."
+          git clone --depth 1 --branch v${{ env.NODE_VERSION }} https://github.com/nodejs/node.git node-src
+
+      - name: 应用 Termux 补丁
+        run: |
+          echo "应用补丁..."
+          cd node-src
+          for patch in ../patches/*.patch; do
+            if [ -f "$patch" ]; then
+              echo "应用: $(basename $patch)"
+              patch -p1 < "$patch" || echo "跳过: $(basename $patch)"
+            fi
+          done
+
+      - name: 运行 Docker 容器编译
+        run: |
+          echo "启动 Docker 容器进行编译..."
+          docker run --rm \
+            -v "${{ github.workspace }}/node-src:/workspace/node-src" \
+            -v "${{ github.workspace }}/output:/workspace/output" \
+            -e NODE_VERSION=${{ env.NODE_VERSION }} \
+            ${{ env.DOCKER_IMAGE }} \
+            bash -c "
+              cd /workspace/node-src
+              
+              # 配置环境
+              export ANDROID_NDK_HOME=/opt/android-ndk-r27d
+              export PATH=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin:\$PATH\"
+              export CC=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang\"
+              export CXX=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++\"
+              export AR=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar\"
+              export RANLIB=\"\${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib\"
+              export CC_host=/opt/llvm-project-build/bin/clang
+              export CXX_host=/opt/llvm-project-build/bin/clang++
+              export LD_LIBRARY_PATH=/opt/icu-installed/lib:\$LD_LIBRARY_PATH
+              
+              # 配置 Node.js
+              python3 ./configure \
+                --dest-cpu=arm64 \
+                --dest-os=android \
+                --without-npm \
+                --shared-cares \
+                --shared-openssl \
+                --shared-sqlite \
+                --shared-zlib \
+                --with-intl=system-icu \
+                --cross-compiling \
+                --ninja
+              
+              # 编译
+              ninja -C out/Release -j\$(nproc)
+              
+              # 复制输出
+              mkdir -p /workspace/output/arm64
+              cp out/Release/node /workspace/output/arm64/
+              cp out/Release/node /workspace/output/arm64/node-\${NODE_VERSION}-android-arm64
+            "
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v5
+        with:
+          name: node-android-arm64-docker-v${{ env.NODE_VERSION }}
+          path: output/arm64/
+          retention-days: 30
+
+  release:
+    needs: [build-docker]
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    if: needs.check-version.outputs.is_new_version == 'true'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 下载编译产物
+        uses: actions/download-artifact@v5
+        with:
+          path: output
+
+      - name: 更新版本文件
+        run: |
+          echo '${{ needs.check-version.outputs.node_version }}' > .version
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .version
+          git commit -m "更新版本: ${{ needs.check-version.outputs.node_version }}"
+          git push
+
+      - name: 创建Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.node_version }}-android-docker
+          name: Node.js v${{ needs.check-version.outputs.node_version }} Android版 (Docker)
+          body: |
+            # Node.js Android 预编译版本 (Docker + Termux)
+
+            ## 支持架构
+            - **arm64 (aarch64)**: Android 7.0+ 64位设备
+
+            ## 编译方式
+            使用 Docker 容器运行 Termux 构建环境
+
+            ## 安装说明
+            下载对应架构的二进制文件后，执行以下命令：
+            ```bash
+            chmod +x node
+            ./node --version
+            ```
+
+            ## 编译信息
+            - Node.js版本: ${{ needs.check-version.outputs.node_version }}
+            - ICU版本: 78.1
+            - NDK版本: r27d
+            - LLVM工具链: Chromium Clang
+
+            ## 文件列表
+            | 架构 | 文件名 |
+            |------|--------|
+            | arm64 | node-${{ needs.check-version.outputs.node_version }}-android-arm64 |
+
+          files: |
+            output/**/node-*
+            output/**/node
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
