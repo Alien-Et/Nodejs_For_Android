@@ -78,6 +78,16 @@ jobs:
           echo "克隆 Node.js v${{ env.NODE_VERSION }} 源码..."
           git clone --depth 1 --branch v${{ env.NODE_VERSION }} https://github.com/nodejs/node.git node-src
 
+      - name: 修复 simdutf 函数名称错误
+        run: |
+          echo "修复 simdutf 函数名称..."
+          cd node-src
+          # 修复 Line 509: atomic_base64_to_binary_safe -> base64_to_binary_safe
+          sed -i 's/simdutf::atomic_base64_to_binary_safe/simdutf::base64_to_binary_safe/g' deps/v8/src/builtins/builtins-typed-array.cc
+          # 修复 Line 839: atomic_binary_to_base64 -> binary_to_base64
+          sed -i 's/simdutf::atomic_binary_to_base64/simdutf::binary_to_base64/g' deps/v8/src/builtins/builtins-typed-array.cc
+          echo "补丁应用完成"
+
       - name: 安装Python
         uses: actions/setup-python@v6
         with:
