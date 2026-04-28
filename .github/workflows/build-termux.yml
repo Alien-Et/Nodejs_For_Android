@@ -77,11 +77,6 @@ jobs:
           echo "克隆 Node.js v${{ env.NODE_VERSION }} 源码..."
           git clone --depth 1 --branch v${{ env.NODE_VERSION }} https://github.com/nodejs/node.git node-src
 
-      - name: 克隆Termux包仓库
-        run: |
-          echo "克隆 Termux 包仓库..."
-          git clone --depth 1 https://github.com/termux/termux-packages.git termux-packages
-
       - name: 安装Python
         uses: actions/setup-python@v6
         with:
@@ -99,31 +94,18 @@ jobs:
 
       - name: 应用Termux补丁
         run: |
-          echo "应用 Termux 补丁..."
+          echo "应用 Termux LTS 补丁..."
           cd node-src
           
-          # 查找 Termux Node.js 补丁
-          PATCH_DIR="../termux-packages/packages/nodejs"
+          # 应用仓库中的所有补丁
+          for patch in ../patches/*.patch; do
+            if [ -f "$patch" ]; then
+              echo "应用补丁: $(basename $patch)"
+              patch -p1 < "$patch" || echo "补丁 $(basename $patch) 应用失败，继续..."
+            fi
+          done
           
-          if [ -d "$PATCH_DIR" ]; then
-            echo "找到补丁目录: $PATCH_DIR"
-            ls -la "$PATCH_DIR"
-            
-            # 应用所有 .patch 文件
-            for patch in "$PATCH_DIR"/*.patch; do
-              if [ -f "$patch" ]; then
-                echo "应用补丁: $patch"
-                patch -p1 < "$patch" || echo "补丁 $patch 应用失败，继续..."
-              fi
-            done
-          else
-            echo "警告: 未找到 Termux Node.js 补丁目录"
-            echo "尝试手动修复已知问题..."
-            
-            # 手动修复 simdutf 函数名称
-            sed -i 's/simdutf::atomic_base64_to_binary_safe/simdutf::base64_to_binary_safe/g' deps/v8/src/builtins/builtins-typed-array.cc
-            sed -i 's/simdutf::atomic_binary_to_base64/simdutf::binary_to_base64/g' deps/v8/src/builtins/builtins-typed-array.cc
-          fi
+          echo "补丁应用完成"
 
       - name: 配置编译环境
         run: |
