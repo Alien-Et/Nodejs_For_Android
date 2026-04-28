@@ -1,0 +1,257 @@
+name: Node.js Android 编译 (Termux 方式)
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: 'Node.js版本号（例如：24.0.0），留空则自动检查最新版本'
+        required: false
+        type: string
+
+env:
+  NDK_VERSION: 'r27d'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    outputs:
+      node_version: ${{ steps.check.outputs.node_version }}
+      should_build: ${{ steps.check.outputs.should_build }}
+      is_new_version: ${{ steps.check.outputs.is_new_version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 检查Node.js版本
+        id: check
+        run: |
+          INPUT_VERSION="${{ github.event.inputs.node_version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            NODE_VERSION="$INPUT_VERSION"
+            echo "手动指定版本: $NODE_VERSION"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "is_new_version=false" >> $GITHUB_OUTPUT
+          else
+            echo "自动检查最新版本..."
+            LATEST_VERSION=$(curl -s https://nodejs.org/dist/latest/ | grep -oP 'v\d+\.\d+\.\d+' | head -1 | sed 's/v//')
+            CURRENT_VERSION=$(cat .version 2>/dev/null || echo "0.0.0")
+            echo "当前版本: $CURRENT_VERSION"
+            echo "最新版本: $LATEST_VERSION"
+            NODE_VERSION="$LATEST_VERSION"
+            if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+              echo "发现新版本: $LATEST_VERSION"
+              echo "should_build=true" >> $GITHUB_OUTPUT
+              echo "is_new_version=true" >> $GITHUB_OUTPUT
+            else
+              echo "已是最新版本，无需编译"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              echo "is_new_version=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+          echo "node_version=$NODE_VERSION" >> $GITHUB_OUTPUT
+
+  build-arm64:
+    needs: check-version
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    if: needs.check-version.outputs.should_build == 'true'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置环境变量
+        run: |
+          echo "NODE_VERSION=${{ needs.check-version.outputs.node_version }}" >> $GITHUB_ENV
+          echo "TARGET_ARCH=arm64" >> $GITHUB_ENV
+          echo "DEST_CPU=arm64" >> $GITHUB_ENV
+
+      - name: 克隆Node.js源码
+        run: |
+          echo "克隆 Node.js v${{ env.NODE_VERSION }} 源码..."
+          git clone --depth 1 --branch v${{ env.NODE_VERSION }} https://github.com/nodejs/node.git node-src
+
+      - name: 克隆Termux包仓库
+        run: |
+          echo "克隆 Termux 包仓库..."
+          git clone --depth 1 https://github.com/termux/termux-packages.git termux-packages
+
+      - name: 安装Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git wget unzip ninja-build
+
+      - name: 下载Android NDK
+        uses: android-actions/setup-android@v3
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      - name: 应用Termux补丁
+        run: |
+          echo "应用 Termux 补丁..."
+          cd node-src
+          
+          # 查找 Termux Node.js 补丁
+          PATCH_DIR="../termux-packages/packages/nodejs"
+          
+          if [ -d "$PATCH_DIR" ]; then
+            echo "找到补丁目录: $PATCH_DIR"
+            ls -la "$PATCH_DIR"
+            
+            # 应用所有 .patch 文件
+            for patch in "$PATCH_DIR"/*.patch; do
+              if [ -f "$patch" ]; then
+                echo "应用补丁: $patch"
+                patch -p1 < "$patch" || echo "补丁 $patch 应用失败，继续..."
+              fi
+            done
+          else
+            echo "警告: 未找到 Termux Node.js 补丁目录"
+            echo "尝试手动修复已知问题..."
+            
+            # 手动修复 simdutf 函数名称
+            sed -i 's/simdutf::atomic_base64_to_binary_safe/simdutf::base64_to_binary_safe/g' deps/v8/src/builtins/builtins-typed-array.cc
+            sed -i 's/simdutf::atomic_binary_to_base64/simdutf::binary_to_base64/g' deps/v8/src/builtins/builtins-typed-array.cc
+          fi
+
+      - name: 配置编译环境
+        run: |
+          cd node-src
+          
+          NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="$NDK_TOOLCHAIN/bin:$PATH"
+          
+          echo "=== NDK环境变量 ==="
+          echo "ANDROID_NDK_HOME: $ANDROID_NDK_HOME"
+          
+          # 查找编译器
+          CC=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang 2>/dev/null | sort -V | tail -1)
+          CXX=$(ls "$NDK_TOOLCHAIN/bin/aarch64-linux-android"*-clang++ 2>/dev/null | sort -V | tail -1)
+          
+          echo "=== 使用的编译器 ==="
+          echo "CC: $CC"
+          echo "CXX: $CXX"
+          
+          if [ -z "$CC" ] || [ ! -f "$CC" ]; then
+            echo "ERROR: C编译器不存在"
+            exit 1
+          fi
+          
+          # 保存环境变量
+          echo "CC=$CC" >> $GITHUB_ENV
+          echo "CXX=$CXX" >> $GITHUB_ENV
+          echo "AR=$NDK_TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+          echo "RANLIB=$NDK_TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+          echo "PATH=$NDK_TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
+          
+          # 配置 Node.js - 使用 Termux 风格的配置
+          echo "配置 Node.js..."
+          python3 ./configure \
+            --dest-cpu=${{ env.DEST_CPU }} \
+            --dest-os=android \
+            --cross-compiling \
+            --ninja
+
+      - name: 编译Node.js
+        run: |
+          cd node-src
+          export PATH="${{ env.PATH }}"
+          echo "开始编译 Node.js arm64 版本..."
+          ninja -C out/Release \
+            CC="${{ env.CC }}" \
+            CXX="${{ env.CXX }}" \
+            AR="${{ env.AR }}" \
+            RANLIB="${{ env.RANLIB }}" \
+            CC_host="gcc" \
+            CXX_host="g++" \
+            AR_host="ar" \
+            RANLIB_host="ranlib"
+
+      - name: 准备输出文件
+        run: |
+          mkdir -p output/${{ env.TARGET_ARCH }}
+          cd node-src
+          cp out/Release/node ../output/${{ env.TARGET_ARCH }}/
+          cp out/Release/node ../output/${{ env.TARGET_ARCH }}/node-${{ env.NODE_VERSION }}-android-${{ env.TARGET_ARCH }}
+
+      - name: 上传编译产物
+        uses: actions/upload-artifact@v5
+        with:
+          name: node-android-arm64-termux-v${{ env.NODE_VERSION }}
+          path: output/${{ env.TARGET_ARCH }}/
+          retention-days: 30
+
+  release:
+    needs: [build-arm64]
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+    if: needs.check-version.outputs.is_new_version == 'true'
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 下载所有编译产物
+        uses: actions/download-artifact@v5
+        with:
+          path: output
+
+      - name: 更新版本文件
+        run: |
+          echo '${{ needs.check-version.outputs.node_version }}' > .version
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .version
+          git commit -m "更新版本: ${{ needs.check-version.outputs.node_version }}"
+          git push
+
+      - name: 创建Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.node_version }}-android-termux
+          name: Node.js v${{ needs.check-version.outputs.node_version }} Android版 (Termux)
+          body: |
+            # Node.js Android 预编译版本 (Termux 方式)
+
+            ## 支持架构
+            - **arm64 (aarch64)**: Android 7.0+ 64位设备
+
+            ## 编译方式
+            使用 Termux 官方补丁和编译方式
+
+            ## 安装说明
+            下载对应架构的二进制文件后，执行以下命令：
+            ```bash
+            chmod +x node
+            ./node --version
+            ```
+
+            ## 编译信息
+            - Node.js版本: ${{ needs.check-version.outputs.node_version }}
+            - NDK版本: ${{ env.NDK_VERSION }}
+            - 编译选项: --cross-compiling --ninja
+
+            ## 文件列表
+            | 架构 | 文件名 |
+            |------|--------|
+            | arm64 | node-${{ needs.check-version.outputs.node_version }}-android-arm64 |
+
+          files: |
+            output/**/node-*
+            output/**/node
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
